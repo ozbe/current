@@ -42,9 +42,12 @@ impl UserMsg {
 async fn main() {
     pretty_env_logger::init();
 
+    let users = Users::default();
+    let redis = Arc::new(redis::Client::open("redis://127.0.0.1/").unwrap());
+
     let state = State {
-        users: Users::default(),
-        redis: Arc::new(redis::Client::open("redis://127.0.0.1/").unwrap()),
+        users: users.clone(),
+        redis: redis.clone(),
     };
     // Turn our "state" into a new Filter...
     let state = warp::any().map(move || state.clone());
@@ -63,6 +66,17 @@ async fn main() {
     let index = warp::path::end().map(|| warp::reply::html(INDEX_HTML));
 
     let routes = index.or(chat);
+
+    let mut pubsub_conn = redis.get_async_connection().await.unwrap().into_pubsub();
+    pubsub_conn.subscribe("chat").await.unwrap();
+
+    tokio::task::spawn(async move {
+        let mut pubsub_stream = pubsub_conn.on_message();
+        while let Ok(msg) = pubsub_stream.next().map(|m| m.unwrap().get_payload::<String>()).await {
+            let user_msg: UserMsg = serde_json::from_str(&msg).unwrap();
+            user_message(&user_msg, &users).await;
+        }
+    });
 
     warp::serve(routes).run(([127, 0, 0, 1], 3030)).await;
 }
@@ -96,17 +110,6 @@ async fn user_connected(ws: WebSocket, state: State) {
     // Make an extra clone to give to our disconnection handler...
     let users2 = users.clone();
 
-    let mut pubsub_conn = redis.get_async_connection().await.unwrap().into_pubsub();
-    pubsub_conn.subscribe("chat").await.unwrap();
-
-    tokio::task::spawn(async move {
-        let mut pubsub_stream = pubsub_conn.on_message();
-        while let Ok(msg) = pubsub_stream.next().map(|m| m.unwrap().get_payload::<String>()).await {
-            let user_msg: UserMsg = serde_json::from_str(&msg).unwrap();
-            user_message(my_id, &user_msg, &users).await;
-        }
-    });
-
     // Every time the user sends a message, public it to Redis
     let mut publish_conn = redis.get_async_connection().await.unwrap();
     while let Some(result) = user_ws_rx.next().await {
@@ -134,16 +137,12 @@ async fn user_connected(ws: WebSocket, state: State) {
     user_disconnected(my_id, &users2).await;
 }
 
-async fn user_message(my_id: usize, msg: &UserMsg, users: &Users) {
-    if my_id != msg.user_id {
-        return;
-    }
-
-    let new_msg = format!("<User#{}>: {}", my_id, msg.msg);
+async fn user_message(msg: &UserMsg, users: &Users) {
+    let new_msg = format!("<User#{}>: {}", msg.user_id, msg.msg);
 
     // New message from this user, send it to everyone else (except same uid)...
     for (&uid, tx) in users.read().await.iter() {
-        if my_id != uid {
+        if msg.user_id != uid {
             if let Err(_disconnected) = tx.send(Ok(Message::text(new_msg.clone()))) {
                 // The tx is disconnected, our `user_disconnected` code
                 // should be happening in another task, nothing more to
