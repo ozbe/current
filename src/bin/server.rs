@@ -1,10 +1,9 @@
-// Example from https://github.com/seanmonstar/warp/blob/master/examples/websockets_chat.rs
-
-// #![deny(warnings)]
 use std::collections::HashMap;
 use std::sync::{atomic::{AtomicUsize, Ordering}, Arc};
 
 use futures::{FutureExt, StreamExt};
+use redis::AsyncCommands;
+use serde::{Deserialize, Serialize};
 use tokio::sync::{mpsc, RwLock};
 use warp::ws::{Message, WebSocket};
 use warp::Filter;
@@ -18,24 +17,46 @@ static NEXT_USER_ID: AtomicUsize = AtomicUsize::new(1);
 /// - Value is a sender of `warp::ws::Message`
 type Users = Arc<RwLock<HashMap<usize, mpsc::UnboundedSender<Result<Message, warp::Error>>>>>;
 
+#[derive(Clone)]
+struct State {
+    users: Users,
+    redis: Arc<redis::Client>,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+struct UserMsg {
+    user_id: usize,
+    msg: String,
+}
+
+impl UserMsg {
+    fn new(user_id: usize, msg: impl ToString) -> UserMsg {
+        UserMsg {
+            user_id,
+            msg: msg.to_string(),
+        }
+    }
+}
+
 #[tokio::main]
 async fn main() {
     pretty_env_logger::init();
 
-    // Keep track of all connected users, key is usize, value
-    // is a websocket sender.
-    let users = Users::default();
+    let state = State {
+        users: Users::default(),
+        redis: Arc::new(redis::Client::open("redis://127.0.0.1/").unwrap()),
+    };
     // Turn our "state" into a new Filter...
-    let users = warp::any().map(move || users.clone());
+    let state = warp::any().map(move || state.clone());
 
     // GET /chat -> websocket upgrade
     let chat = warp::path("chat")
         // The `ws()` filter will prepare Websocket handshake...
         .and(warp::ws())
-        .and(users)
-        .map(|ws: warp::ws::Ws, users| {
+        .and(state)
+        .map(|ws: warp::ws::Ws, state: State| {
             // This will call our function if the handshake succeeds.
-            ws.on_upgrade(move |socket| user_connected(socket, users))
+            ws.on_upgrade(move |socket| user_connected(socket, state))
         });
 
     // GET / -> index html
@@ -46,7 +67,9 @@ async fn main() {
     warp::serve(routes).run(([127, 0, 0, 1], 3030)).await;
 }
 
-async fn user_connected(ws: WebSocket, users: Users) {
+async fn user_connected(ws: WebSocket, state: State) {
+    let users = state.users;
+    let redis = state.redis;
     // Use a counter to assign a new unique ID for this user.
     let my_id = NEXT_USER_ID.fetch_add(1, Ordering::Relaxed);
 
@@ -73,8 +96,19 @@ async fn user_connected(ws: WebSocket, users: Users) {
     // Make an extra clone to give to our disconnection handler...
     let users2 = users.clone();
 
-    // Every time the user sends a message, broadcast it to
-    // all other users...
+    let mut pubsub_conn = redis.get_async_connection().await.unwrap().into_pubsub();
+    pubsub_conn.subscribe("chat").await.unwrap();
+
+    tokio::task::spawn(async move {
+        let mut pubsub_stream = pubsub_conn.on_message();
+        while let Ok(msg) = pubsub_stream.next().map(|m| m.unwrap().get_payload::<String>()).await {
+            let user_msg: UserMsg = serde_json::from_str(&msg).unwrap();
+            user_message(my_id, &user_msg, &users).await;
+        }
+    });
+
+    // Every time the user sends a message, public it to Redis
+    let mut publish_conn = redis.get_async_connection().await.unwrap();
     while let Some(result) = user_ws_rx.next().await {
         let msg = match result {
             Ok(msg) => msg,
@@ -83,7 +117,16 @@ async fn user_connected(ws: WebSocket, users: Users) {
                 break;
             }
         };
-        user_message(my_id, msg, &users).await;
+
+        // Skip any non-Text messages...
+        let msg = if let Ok(s) = msg.to_str() {
+            let user_msg = UserMsg::new(my_id, s);
+            serde_json::to_string(&user_msg).unwrap()
+        } else {
+            return;
+        };
+
+        let _: () = publish_conn.publish("chat", msg).await.unwrap();
     }
 
     // user_ws_rx stream will keep processing as long as the user stays
@@ -91,15 +134,12 @@ async fn user_connected(ws: WebSocket, users: Users) {
     user_disconnected(my_id, &users2).await;
 }
 
-async fn user_message(my_id: usize, msg: Message, users: &Users) {
-    // Skip any non-Text messages...
-    let msg = if let Ok(s) = msg.to_str() {
-        s
-    } else {
+async fn user_message(my_id: usize, msg: &UserMsg, users: &Users) {
+    if my_id != msg.user_id {
         return;
-    };
+    }
 
-    let new_msg = format!("<User#{}>: {}", my_id, msg);
+    let new_msg = format!("<User#{}>: {}", my_id, msg.msg);
 
     // New message from this user, send it to everyone else (except same uid)...
     for (&uid, tx) in users.read().await.iter() {
