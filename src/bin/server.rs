@@ -49,12 +49,9 @@ async fn main() {
         users: users.clone(),
         redis: redis.clone(),
     };
-    // Turn our "state" into a new Filter...
     let state = warp::any().map(move || state.clone());
 
-    // GET /chat -> websocket upgrade
     let chat = warp::path("chat")
-        // The `ws()` filter will prepare Websocket handshake...
         .and(warp::ws())
         .and(state)
         .map(|ws: warp::ws::Ws, state: State| {
@@ -62,9 +59,7 @@ async fn main() {
             ws.on_upgrade(move |socket| user_connected(socket, state))
         });
 
-    // GET / -> index html
     let index = warp::path::end().map(|| warp::reply::html(INDEX_HTML));
-
     let routes = index.or(chat);
 
     let mut pubsub_conn = redis.get_async_connection().await.unwrap().into_pubsub();
@@ -84,16 +79,12 @@ async fn main() {
 async fn user_connected(ws: WebSocket, state: State) {
     let users = state.users;
     let redis = state.redis;
-    // Use a counter to assign a new unique ID for this user.
     let my_id = NEXT_USER_ID.fetch_add(1, Ordering::Relaxed);
 
     eprintln!("new chat user: {}", my_id);
 
-    // Split the socket into a sender and receive of messages.
     let (user_ws_tx, mut user_ws_rx) = ws.split();
 
-    // Use an unbounded channel to handle buffering and flushing of messages
-    // to the websocket...
     let (tx, rx) = mpsc::unbounded_channel();
     tokio::task::spawn(rx.forward(user_ws_tx).map(|result| {
         if let Err(e) = result {
@@ -101,16 +92,10 @@ async fn user_connected(ws: WebSocket, state: State) {
         }
     }));
 
-    // Save the sender in our list of connected users.
     users.write().await.insert(my_id, tx);
 
-    // Return a `Future` that is basically a state machine managing
-    // this specific user's connection.
-
-    // Make an extra clone to give to our disconnection handler...
     let users2 = users.clone();
 
-    // Every time the user sends a message, public it to Redis
     let mut publish_conn = redis.get_async_connection().await.unwrap();
     while let Some(result) = user_ws_rx.next().await {
         let msg = match result {
@@ -132,15 +117,12 @@ async fn user_connected(ws: WebSocket, state: State) {
         let _: () = publish_conn.publish("chat", msg).await.unwrap();
     }
 
-    // user_ws_rx stream will keep processing as long as the user stays
-    // connected. Once they disconnect, then...
     user_disconnected(my_id, &users2).await;
 }
 
 async fn user_message(msg: &UserMsg, users: &Users) {
     let new_msg = format!("<User#{}>: {}", msg.user_id, msg.msg);
 
-    // New message from this user, send it to everyone else (except same uid)...
     for (&uid, tx) in users.read().await.iter() {
         if msg.user_id != uid {
             if let Err(_disconnected) = tx.send(Ok(Message::text(new_msg.clone()))) {
@@ -155,7 +137,6 @@ async fn user_message(msg: &UserMsg, users: &Users) {
 async fn user_disconnected(my_id: usize, users: &Users) {
     eprintln!("good bye user: {}", my_id);
 
-    // Stream closed up, so remove from the user list
     users.write().await.remove(&my_id);
 }
 
