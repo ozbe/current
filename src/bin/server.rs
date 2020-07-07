@@ -1,5 +1,8 @@
 use std::collections::HashMap;
-use std::sync::{atomic::{AtomicUsize, Ordering}, Arc};
+use std::sync::{
+    atomic::{AtomicUsize, Ordering},
+    Arc,
+};
 
 use futures::{FutureExt, StreamExt};
 use redis::AsyncCommands;
@@ -51,13 +54,14 @@ async fn main() {
     };
     let state = warp::any().map(move || state.clone());
 
-    let chat = warp::path("chat")
-        .and(warp::ws())
-        .and(state)
-        .map(|ws: warp::ws::Ws, state: State| {
-            // This will call our function if the handshake succeeds.
-            ws.on_upgrade(move |socket| user_connected(socket, state))
-        });
+    let chat =
+        warp::path("chat")
+            .and(warp::ws())
+            .and(state)
+            .map(|ws: warp::ws::Ws, state: State| {
+                // This will call our function if the handshake succeeds.
+                ws.on_upgrade(move |socket| user_connected(socket, state))
+            });
 
     let index = warp::path::end().map(|| warp::reply::html(INDEX_HTML));
     let routes = index.or(chat);
@@ -67,7 +71,11 @@ async fn main() {
 
     tokio::task::spawn(async move {
         let mut pubsub_stream = pubsub_conn.on_message();
-        while let Ok(msg) = pubsub_stream.next().map(|m| m.unwrap().get_payload::<String>()).await {
+        while let Ok(msg) = pubsub_stream
+            .next()
+            .map(|m| m.unwrap().get_payload::<String>())
+            .await
+        {
             let user_msg: UserMsg = serde_json::from_str(&msg).unwrap();
             user_message(&user_msg, &users).await;
         }
