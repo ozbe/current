@@ -17,3 +17,6 @@ serde_json = "1.0.56"
 tokio = { version = "0.2.21", features = ["macros", "sync"] }
 warp = "0.2.3"
 log = "0.4.8"
+termion = "1.5.5"
+unicode-width = "0.1.8"
+tui = "0.9.5"
