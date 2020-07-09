@@ -1,8 +1,5 @@
 use std::collections::HashMap;
-use std::sync::{
-    atomic::{AtomicUsize, Ordering},
-    Arc,
-};
+use std::sync::Arc;
 
 use futures::{FutureExt, StreamExt};
 use redis::AsyncCommands;
@@ -10,9 +7,6 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::{mpsc, RwLock};
 use warp::ws::{Message, WebSocket};
 use warp::Filter;
-
-/// Our global unique user id counter.
-static NEXT_USER_ID: AtomicUsize = AtomicUsize::new(1);
 
 /// Our state of currently connected users.
 ///
@@ -87,7 +81,10 @@ async fn main() {
 async fn user_connected(ws: WebSocket, state: State) {
     let users = state.users;
     let redis = state.redis;
-    let my_id = NEXT_USER_ID.fetch_add(1, Ordering::Relaxed);
+    let my_id = {
+        let mut conn = redis.get_async_connection().await.unwrap();
+        conn.incr("user_id", 1u8).await.unwrap()
+    };
 
     eprintln!("new chat user: {}", my_id);
 
