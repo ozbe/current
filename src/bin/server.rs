@@ -1,3 +1,6 @@
+#[macro_use]
+extern crate log;
+
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -86,14 +89,14 @@ async fn user_connected(ws: WebSocket, state: State) {
         conn.incr("user_id", 1u8).await.unwrap()
     };
 
-    eprintln!("new chat user: {}", my_id);
+    info!("new chat user: {}", my_id);
 
     let (user_ws_tx, mut user_ws_rx) = ws.split();
 
     let (tx, rx) = mpsc::unbounded_channel();
     tokio::task::spawn(rx.forward(user_ws_tx).map(|result| {
         if let Err(e) = result {
-            eprintln!("websocket send error: {}", e);
+            error!("websocket send error: {}", e);
         }
     }));
 
@@ -106,7 +109,7 @@ async fn user_connected(ws: WebSocket, state: State) {
         let msg = match result {
             Ok(msg) => msg,
             Err(e) => {
-                eprintln!("websocket error(uid={}): {}", my_id, e);
+                error!("websocket error(uid={}): {}", my_id, e);
                 break;
             }
         };
@@ -140,7 +143,7 @@ async fn user_message(msg: &UserMsg, users: &Users) {
 }
 
 async fn user_disconnected(my_id: usize, users: &Users) {
-    eprintln!("good bye user: {}", my_id);
+    info!("good bye user: {}", my_id);
 
     users.write().await.remove(&my_id);
 }
