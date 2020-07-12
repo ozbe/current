@@ -1,3 +1,6 @@
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{mpsc, Arc, RwLock};
+use std::time::Duration;
 /// Source: https://github.com/fdehau/tui-rs/blob/master/examples/user_input.rs
 /// A simple example demonstrating how to handle user input. This is
 /// a bit out of the scope of the library as it does not provide any
@@ -10,9 +13,14 @@
 ///   * Pressing Backspace erases a character
 ///   * Pressing Enter pushes the current input in the history of previous
 ///   messages
-use std::{error::Error, io::{self, Write}, thread};
+use std::{
+    error::Error,
+    io::{self, Write},
+    thread,
+};
 use termion::{
-    cursor::Goto, event::Key, input::MouseTerminal, input::TermRead, raw::IntoRawMode, screen::AlternateScreen,
+    cursor::Goto, event::Key, input::MouseTerminal, input::TermRead, raw::IntoRawMode,
+    screen::AlternateScreen,
 };
 use tui::{
     backend::TermionBackend,
@@ -22,9 +30,8 @@ use tui::{
     Terminal,
 };
 use unicode_width::UnicodeWidthStr;
-use std::sync::{mpsc, Arc};
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::Duration;
+use websocket::ClientBuilder;
+use websocket::OwnedMessage;
 
 pub enum Event<I> {
     Input(I),
@@ -120,7 +127,7 @@ struct App {
     /// Current input mode
     input_mode: InputMode,
     /// History of recorded messages
-    messages: Vec<String>,
+    messages: Arc<RwLock<Vec<String>>>,
 }
 
 impl Default for App {
@@ -128,12 +135,18 @@ impl Default for App {
         App {
             input: String::new(),
             input_mode: InputMode::Normal,
-            messages: Vec::new(),
+            messages: Arc::new(RwLock::new(Vec::new())),
         }
     }
 }
 
 fn main() -> Result<(), Box<dyn Error>> {
+    let ws = ClientBuilder::new("ws://127.0.0.1:3030/chat")
+        .unwrap()
+        .connect_insecure()
+        .unwrap();
+    let (mut receiver, mut sender) = ws.split().unwrap();
+
     // Terminal initialization
     let stdout = io::stdout().into_raw_mode()?;
     let stdout = MouseTerminal::from(stdout);
@@ -146,6 +159,15 @@ fn main() -> Result<(), Box<dyn Error>> {
 
     // Create default app state
     let mut app = App::default();
+    let messages = app.messages.clone();
+
+    thread::spawn(move || {
+        for msg in receiver.incoming_messages() {
+            if let Ok(OwnedMessage::Text(text)) = msg {
+                messages.write().unwrap().push(text)
+            }
+        }
+    });
 
     loop {
         // Draw UI
@@ -159,7 +181,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                         Constraint::Length(3),
                         Constraint::Min(1),
                     ]
-                        .as_ref(),
+                    .as_ref(),
                 )
                 .split(f.size());
 
@@ -176,8 +198,8 @@ fn main() -> Result<(), Box<dyn Error>> {
                 .style(Style::default().fg(Color::Yellow))
                 .block(Block::default().borders(Borders::ALL).title("Input"));
             f.render_widget(input, chunks[1]);
-            let messages = app
-                .messages
+            let messages = app.messages.read().unwrap();
+            let messages = messages
                 .iter()
                 .enumerate()
                 .map(|(i, m)| Text::raw(format!("{}: {}", i, m)));
@@ -204,13 +226,17 @@ fn main() -> Result<(), Box<dyn Error>> {
                         events.disable_exit_key();
                     }
                     Key::Char('q') => {
+                        sender.send_message(&OwnedMessage::Close(None)).unwrap();
                         break;
                     }
                     _ => {}
                 },
                 InputMode::Editing => match input {
                     Key::Char('\n') => {
-                        app.messages.push(app.input.drain(..).collect());
+                        let input: String = app.input.drain(..).collect();
+                        app.messages.write().unwrap().push(format!("<You>: {}", input));
+                        sender.send_message(&OwnedMessage::Text(input)).unwrap();
+
                     }
                     Key::Char(c) => {
                         app.input.push(c);

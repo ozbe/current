@@ -20,3 +20,4 @@ tokio = { version = "0.2.21", features = ["macros", "sync"] }
 tui = "0.9.5"
 unicode-width = "0.1"
 warp = "0.2.3"
+websocket = "0.26.2"
