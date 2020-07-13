@@ -181,7 +181,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                         Constraint::Length(3),
                         Constraint::Min(1),
                     ]
-                    .as_ref(),
+                        .as_ref(),
                 )
                 .split(f.size());
 
